@@ -114,6 +114,18 @@ function Set-TrusteeAccessRule {
 
     $entry = [ADSI]"LDAP://$TargetDistinguishedName"
     $security = $entry.psbase.ObjectSecurity
+    $existingRules = $security.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) |
+        Where-Object {
+            $_.IdentityReference -eq $TrusteeSid -and
+            $_.ActiveDirectoryRights -eq $Rights -and
+            $_.ObjectType -eq $ObjectType -and
+            $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow
+        }
+
+    foreach ($rule in $existingRules) {
+        $security.RemoveAccessRuleSpecific($rule) | Out-Null
+    }
+
     $ace = New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
         $TrusteeSid,
         $Rights,
@@ -121,14 +133,17 @@ function Set-TrusteeAccessRule {
         $ObjectType
     )
 
-    while ($security.RemoveAccessRule($ace)) { }
     $security.AddAccessRule($ace)
     $entry.psbase.ObjectSecurity = $security
     $entry.psbase.CommitChanges()
 }
 
 $membershipOu = "OU=Membership,$ParentOu"
-$membership = Get-ADOrganizationalUnit -Identity $membershipOu -ErrorAction SilentlyContinue
+try {
+    $membership = Get-ADOrganizationalUnit -Identity $membershipOu -ErrorAction Stop
+} catch [Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException] {
+    $membership = $null
+}
 if (-not $membership) {
     $membership = New-ADOrganizationalUnit -Name "Membership" -Path $ParentOu -ProtectedFromAccidentalDeletion $true -PassThru
 } elseif (-not $membership.ProtectedFromAccidentalDeletion) {
@@ -187,11 +202,19 @@ foreach ($definition in $aceDefinitions) {
 }
 
 $controlUserDn = "CN=ControlUser,$($membership.DistinguishedName)"
-$controlUser = Get-ADUser -Identity $controlUserDn -ErrorAction SilentlyContinue
+try {
+    $controlUser = Get-ADUser -Identity $controlUserDn -Properties Enabled -ErrorAction Stop
+} catch [Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException] {
+    $controlUser = $null
+}
 if (-not $controlUser) {
     $password = Read-Host -Prompt "Enter password for ControlUser" -AsSecureString
     New-ADUser -Name "ControlUser" -SamAccountName "ControlUser" -UserPrincipalName "ControlUser@$(Get-ADDomain).DNSRoot" -AccountPassword $password -Enabled $true -ChangePasswordAtLogon $false -PasswordNeverExpires $false -Path $membership.DistinguishedName
 } else {
-    Write-Verbose "ControlUser already exists in $($membership.DistinguishedName)."
+    if (-not $controlUser.Enabled) {
+        Set-ADUser -Identity $controlUser -Enabled $true
+        Write-Verbose "ControlUser re-enabled."
+    } else {
+        Write-Verbose "ControlUser already exists in $($membership.DistinguishedName)."
+    }
 }
-

@@ -112,6 +112,15 @@ try {
     Start-Transcript -Path $TranscriptPath -Force 
     $transcriptStarted = $true
 
+    Write-Host ("=" * 60)
+    Write-Host "Initial TrusteeGroup membership:"
+    $trusteeGroupDN = "CN=TrusteeGroup,$OrganizationalUnitDN"
+    Write-GroupMembership -GroupIdentity $trusteeGroupDN -Heading "TrusteeGroup Membership:"
+
+    Write-Host ("=" * 60)
+    Write-Host "Current user token (whoami /all):"
+    & whoami.exe /all
+
     foreach ($groupName in $groupNames) {
         $groupDN = "CN=$groupName,$OrganizationalUnitDN"
         Write-Host ("=" * 60)

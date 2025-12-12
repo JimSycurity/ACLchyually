@@ -10,12 +10,19 @@ ControlUser account with a prompted password inside the OU.
 
 .PARAMETER ParentOu
 DistinguishedName of the OU under which the Membership OU will be created.
+
+.PARAMETER TrusteeUser
+Optional AD user identity to add to the TrusteeGroup during provisioning.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
-    [string]$ParentOu
+    [string]$ParentOu,
+
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$TrusteeUser = 'StdUser'
 )
 
 Import-Module ActiveDirectory -ErrorAction Stop
@@ -88,8 +95,13 @@ function Ensure-DomainLocalGroup {
     )
 
     $dn = "CN=$Name,$Path"
-    $group = Get-ADGroup -Identity $dn -ErrorAction SilentlyContinue
-    if (-not $group) {
+    try {
+        $group = Get-ADGroup -Identity $dn -ErrorAction Stop
+    } catch [Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException] {
+        $group = $null
+    }
+
+    if ($null -eq $group) {
         $group = New-ADGroup -Name $Name -SamAccountName $Name -GroupScope DomainLocal -GroupCategory Security -Path $Path -PassThru
     }
 
@@ -145,9 +157,9 @@ try {
     $membership = $null
 }
 if (-not $membership) {
-    $membership = New-ADOrganizationalUnit -Name "Membership" -Path $ParentOu -ProtectedFromAccidentalDeletion $true -PassThru
-} elseif (-not $membership.ProtectedFromAccidentalDeletion) {
-    Set-ADOrganizationalUnit -Identity $membership -ProtectedFromAccidentalDeletion $true
+    $membership = New-ADOrganizationalUnit -Name "Membership" -Path $ParentOu -ProtectedFromAccidentalDeletion $false -PassThru
+} elseif ($membership.ProtectedFromAccidentalDeletion) {
+    Set-ADOrganizationalUnit -Identity $membership -ProtectedFromAccidentalDeletion $false
 }
 
 Enable-DaclProtection -DistinguishedName $membership.DistinguishedName
@@ -164,14 +176,21 @@ $groupNames = @(
     "WritePropertyMember",
     "AllValidatedWrites",
     "SelfMembership",
-    "SelfMembershipPropertySet",    # Testing with property set on VW
-    "SelfMemberProperty",           # Testing with Member attribute on VW   
+    "SelfMembershipPropertySet",    # Testing with property set on VW  
     "TrusteeGroup"
 )
 
 $groupCache = @{}
 foreach ($name in $groupNames) {
     $groupCache[$name] = Ensure-DomainLocalGroup -Name $name -Path $membership.DistinguishedName
+}
+
+if ($PSBoundParameters.ContainsKey("TrusteeUser")) {
+    try {
+        Add-ADGroupMember -Identity $groupCache["TrusteeGroup"].DistinguishedName -Members $TrusteeUser -ErrorAction Stop
+    } catch {
+        throw "Unable to add specified trustee user '$TrusteeUser' to TrusteeGroup: $($_.Exception.Message)"
+    }
 }
 
 $trusteeSid = $groupCache["TrusteeGroup"].SID
@@ -191,8 +210,7 @@ $aceDefinitions = @(
     @{ Name = "WritePropertyMember"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::WriteProperty; ObjectGuid = $memberAttributeGuid },
     @{ Name = "AllValidatedWrites"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self },
     @{ Name = "SelfMembership"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $selfMembershipGuid },
-    @{ Name = "SelfMembershipPropertySet"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $membershipPropertySetGuid }, # Testing with property set on VW
-    @{ Name = "SelfMemberProperty"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $memberAttributeGuid  }         
+    @{ Name = "SelfMembershipPropertySet"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $membershipPropertySetGuid } # Testing with property set on VW     
 )
 
 foreach ($definition in $aceDefinitions) {

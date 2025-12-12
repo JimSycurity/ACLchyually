@@ -31,8 +31,7 @@ $groupNames = @(
     "WritePropertyMember",
     "AllValidatedWrites",
     "SelfMembership",
-    "SelfMembershipPropertySet",
-    "SelfMemberProperty"
+    "SelfMembershipPropertySet"
 )
 
 $currentUserResolved = $null
@@ -108,6 +107,36 @@ function Add-MemberWithLogging {
     }
 }
 
+function Write-CurrentTokenInfo {
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    Write-Host "User Identity: $($identity.Name)"
+    Write-Host "Authentication Type: $($identity.AuthenticationType)"
+    Write-Host "Impersonation Level: $($identity.ImpersonationLevel)"
+    Write-Host "SID: $($identity.User.Value)"
+
+    Write-Host "Group Membership (token):"
+    $groupInfo = foreach ($groupSid in $identity.Groups) {
+        $name = $null
+        try {
+            $name = $groupSid.Translate([System.Security.Principal.NTAccount]).Value
+        } catch {
+            $name = "(unresolved)"
+        }
+
+        [PSCustomObject]@{
+            Name       = $name
+            SID        = $groupSid.Value
+            Attributes = $groupSid.Attributes
+        }
+    }
+
+    if ($groupInfo) {
+        $groupInfo | Format-Table -AutoSize
+    } else {
+        Write-Host "    (No groups)"
+    }
+}
+
 try {
     Start-Transcript -Path $TranscriptPath -Force 
     $transcriptStarted = $true
@@ -118,8 +147,8 @@ try {
     Write-GroupMembership -GroupIdentity $trusteeGroupDN -Heading "TrusteeGroup Membership:"
 
     Write-Host ("=" * 60)
-    Write-Host "Current user token (whoami /all):"
-    & whoami.exe /all
+    Write-Host "Current user token information:"
+    Write-CurrentTokenInfo
 
     foreach ($groupName in $groupNames) {
         $groupDN = "CN=$groupName,$OrganizationalUnitDN"

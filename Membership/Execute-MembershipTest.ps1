@@ -1,30 +1,132 @@
-<# TODO
-  Write a properly formatted and documented PowerShell script that will test the following scenario:
-  Configure and start a PowerShell transcript that will capture all test output.
-  For each group in $groupNames:
-    1. Output the security descriptor of the group in SDDL format
-    2. Output the security desriptor of the group in .nTSecurityDescriptor.Access format
-    3. Output current membership of the group. If there are no members, ensure that is shown.
-    4. Attempt to add both the user running the script and the Active Directory user 'ControlUser' to the group. For each attempt, ensure the output is captured to the transcript.  Note: This should be done in such a way that any use of the Self-Membership validated write properly adds the current user if possible.
-    5. Display membership of the group after attempting to add the users to the group.
-  
-  The OU where the groups and 'ControlUser' are located can be provided as a parameter to the script.  The groups and their permissions will have been created by the New-MembershipTest.ps1 script in the same directory path.
-#>
+param(
+    [string]$OrganizationalUnitDN = "OU=Membership,OU=Misconfigs,DC=corp1,DC=lab,DC=home-labs,DC=lol",
+    [string]$TranscriptPath
+)
 
+if ([string]::IsNullOrWhiteSpace($OrganizationalUnitDN)) {
+    throw "OrganizationalUnitDN must be provided."
+}
+
+if (-not $TranscriptPath) {
+    $timestamp = Get-Date -Format "yyyyMMddHHmmss"
+    $TranscriptPath = Join-Path -Path $PSScriptRoot -ChildPath "MembershipTest-$timestamp.log"
+}
+
+$transcriptDirectory = Split-Path -Parent $TranscriptPath
+if ($transcriptDirectory -and -not (Test-Path -LiteralPath $transcriptDirectory)) {
+    New-Item -Path $transcriptDirectory -ItemType Directory -Force | Out-Null
+}
+
+Import-Module ActiveDirectory -ErrorAction Stop
 
 $groupNames = @(
     "GenericAllAll",
     "GenericWriteAll",
     "WritePropertyAll",
     "GenericAllMembershipPropertySet",
-    "GenericWriteMembershipPropertySet",    
+    "GenericWriteMembershipPropertySet",
     "WritePropertyMembershipPropertySet",
     "GenericAllPropertyMember",
-    "GenericWritePropertyMember",        
+    "GenericWritePropertyMember",
     "WritePropertyMember",
     "AllValidatedWrites",
     "SelfMembership",
-    "SelfMembershipPropertySet",    # Testing with property set on VW
-    "SelfMemberProperty",           # Testing with Member attribute on VW   
-    "TrusteeGroup"
+    "SelfMembershipPropertySet",
+    "SelfMemberProperty"
 )
+
+$currentUserResolved = $null
+try {
+    $currentUserSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $currentUserResolved = Get-ADUser -Identity $currentUserSid -ErrorAction Stop
+} catch {
+    throw "Unable to resolve current user in Active Directory: $($_.Exception.Message)"
+}
+
+$currentUserIdentity = $currentUserResolved.DistinguishedName
+$controlUserDN = "CN=ControlUser,$OrganizationalUnitDN"
+$transcriptStarted = $false
+
+function Write-GroupMembership {
+    param(
+        [string]$GroupIdentity,
+        [string]$Heading
+    )
+
+    Write-Host $Heading
+    try {
+        $members = Get-ADGroupMember -Identity $GroupIdentity -ErrorAction Stop
+        if (-not $members) {
+            Write-Host "    (No members)"
+            return
+        }
+
+        $members | Select-Object Name, SamAccountName, ObjectClass |
+            Format-Table -AutoSize
+    } catch {
+        Write-Warning ("Unable to enumerate members for {0}: {1}" -f $GroupIdentity, $_.Exception.Message)
+    }
+}
+
+function Write-SecurityDescriptorDetails {
+    param(
+        [string]$DistinguishedName
+    )
+
+    try {
+        $adObject = Get-ADObject -Identity $DistinguishedName -Properties nTSecurityDescriptor -ErrorAction Stop
+        $descriptor = $adObject.nTSecurityDescriptor
+        if (-not $descriptor) {
+            Write-Warning "No security descriptor returned for $DistinguishedName."
+            return
+        }
+
+        Write-Host "SDDL:"
+        Write-Output ($descriptor.GetSecurityDescriptorSddlForm("All"))
+        Write-Host "Access Rules:"
+        $descriptor.Access |
+            Select-Object AccessControlType, IdentityReference, ActiveDirectoryRights, ObjectType, InheritedObjectType, IsInherited |
+            Format-Table -AutoSize
+    } catch {
+        Write-Warning ("Unable to read security descriptor for {0}: {1}" -f $DistinguishedName, $_.Exception.Message)
+    }
+}
+
+function Add-MemberWithLogging {
+    param(
+        [string]$GroupIdentity,
+        [string]$MemberIdentity,
+        [string]$Label
+    )
+
+    Write-Host "Attempting to add $Label ($MemberIdentity) to $GroupIdentity"
+    try {
+        Add-ADGroupMember -Identity $GroupIdentity -Members $MemberIdentity -ErrorAction Stop
+        Write-Host "    Success."
+    } catch {
+        Write-Warning ("    Failed to add {0}: {1}" -f $Label, $_.Exception.Message)
+    }
+}
+
+try {
+    Start-Transcript -Path $TranscriptPath -Force 
+    $transcriptStarted = $true
+
+    foreach ($groupName in $groupNames) {
+        $groupDN = "CN=$groupName,$OrganizationalUnitDN"
+        Write-Host ("=" * 60)
+        Write-Host "Processing group: $groupName"
+
+        Write-SecurityDescriptorDetails -DistinguishedName $groupDN
+        Write-GroupMembership -GroupIdentity $groupDN -Heading "Current Membership:"
+
+        Add-MemberWithLogging -GroupIdentity $groupDN -MemberIdentity $currentUserIdentity -Label "Current User"
+        Add-MemberWithLogging -GroupIdentity $groupDN -MemberIdentity $controlUserDN -Label "ControlUser"
+
+        Write-GroupMembership -GroupIdentity $groupDN -Heading "Membership After Add Attempts:"
+    }
+} finally {
+    if ($transcriptStarted) {
+        Stop-Transcript 
+    }
+}

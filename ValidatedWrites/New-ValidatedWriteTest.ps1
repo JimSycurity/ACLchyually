@@ -202,7 +202,6 @@ $testObjects = @(
 )
 
 $validatedWriteNames = @(
-    "SelfMembership",
     "ValidatedDNSHostName",
     "ValidatedAdditionalDNS",
     "ValidatedSPN",    
@@ -323,7 +322,6 @@ $ValidatedSPNGuid = Get-ControlAccessGuid -DisplayName "Validated-SPN"
 $ValildatedWriteComputerGuid = Get-ControlAccessGuid -DisplayName "DS-Validated-Write-Computer"
 
 $aceDefinitions = @(
-    @{ Name = "SelfMembership"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $SelfMembershipGuid},
     @{ Name = "ValidatedDNSHostName"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $ValidatedDNSHostNameGuid},   
     @{ Name = "ValidatedAdditionalDNS"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $ValidatedAdditionalDNSGuid},  
     @{ Name = "ValidatedSPN"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $ValidatedSPNGuid},  

@@ -1,15 +1,17 @@
 <#
 .SYNOPSIS
-Creates a Membership OU test surface with predefined groups, ACEs, and a user.
+Creates a ValidatedWrite OU test surface with predefined tesst users/computers/groups,
+ACEs, and a user.
 
 .DESCRIPTION
 Given a parent OU distinguished name, this script provisions an OU named
-Membership, ensures its DACL is protected, creates a fixed set of domain local
-groups, grants the TrusteeGroup tailored rights on each group, and creates a
-ControlUser account with a prompted password inside the OU.
+ValidatedWrites, ensures its DACL is protected, creates a fixed set of users, 
+computers, and domain local groups. Then grants the TrusteeGroup tailored 
+rights on each test object, and creates a ControlUser account with a prompted 
+password inside the OU.
 
 .PARAMETER ParentOu
-DistinguishedName of the OU under which the Membership OU will be created.
+DistinguishedName of the OU under which the ValidatedWrite OU will be created.
 
 .PARAMETER TrusteeUser
 Optional AD user identity to add to the TrusteeGroup during provisioning.
@@ -150,81 +152,100 @@ function Set-TrusteeAccessRule {
     $entry.psbase.CommitChanges()
 }
 
-$membershipOu = "OU=Membership,$ParentOu"
+$validatedWritesOu = "OU=ValidatedWrites,$ParentOu"
 try {
-    $membership = Get-ADOrganizationalUnit -Identity $membershipOu -ErrorAction Stop
+    $ou = Get-ADOrganizationalUnit -Identity $validatedWritesOu -ErrorAction Stop
 } catch [Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException] {
-    $membership = $null
+    $ou = $null
 }
-if (-not $membership) {
-    $membership = New-ADOrganizationalUnit -Name "Membership" -Path $ParentOu -ProtectedFromAccidentalDeletion $false -PassThru
-} elseif ($membership.ProtectedFromAccidentalDeletion) {
-    Set-ADOrganizationalUnit -Identity $membership -ProtectedFromAccidentalDeletion $false
+if (-not $ou) {
+    $ou= New-ADOrganizationalUnit -Name "ValidatedWrites" -Path $ParentOu -ProtectedFromAccidentalDeletion $false -PassThru
+} elseif ($ou.ProtectedFromAccidentalDeletion) {
+    Set-ADOrganizationalUnit -Identity oup -ProtectedFromAccidentalDeletion $false
 }
 
-Enable-DaclProtection -DistinguishedName $membership.DistinguishedName
+Enable-DaclProtection -DistinguishedName $ou.DistinguishedName
 
-$groupNames = @(
-    "GenericAllAll",
-    "GenericWriteAll",
-    "WritePropertyAll",
-    "GenericAllMembershipPropertySet",
-    "GenericWriteMembershipPropertySet",    
-    "WritePropertyMembershipPropertySet",
-    "GenericAllPropertyMember",
-    "GenericWritePropertyMember",        
-    "WritePropertyMember",
-    "AllValidatedWrites",
-    "SelfMembership",
-    "SelfMembershipPropertySet",    # Testing with property set on VW  
-    "SelfMembershipSelf",  # SELF as Trustee
-    "AllValidatedWritesSelf",  # SELF as trustee
-    "TrusteeGroup"
+$testObjects = @(
+    "user",
+    "computer",
+    "group",   # Domain Local
+    "msDS-GroupManagedServiceAccount" # abreviated as 'gmsa'
 )
 
-$groupCache = @{}
+$validatedWriteNames = @(
+    "SelfMembership",
+    "ValidatedDNSHostName",
+    "ValidatedAdditionalDNS",
+    "ValidatedBehaviorVersion",
+    "ValidatedSPN",    
+    "ValildatedWriteComputer",
+    "AllValidatedWrites"
+)
+
+$trustees = @(
+    "TrusteeGroup",  # abreviated as TG
+    "NT AUTHORITY\SELF" # abreviated as S
+)
+
+<# TODO Modify so that instead of iterating through groupNames to create groups the code will iterate
+ through validatedWriteNames and then nested iterate through $testObjects and then an additional nested
+ iteration over $trustees to create an object of $testObject type that is named 
+ '$ValidatedWriteName_$testObject_$trustee' where $testObject and $trustee may be an abreviation if the comments 
+ on the array define it as such. 
+
+ We want to keep the $objectCache in play for future iterations.
+
+
+#>
+$objectCache = @{}
 foreach ($name in $groupNames) {
-    $groupCache[$name] = Ensure-DomainLocalGroup -Name $name -Path $membership.DistinguishedName
+    $objectCache[$name] = Ensure-DomainLocalGroup -Name $name -Path $ou.DistinguishedName
 }
 
+# TODO: Create the domain local TrusteeGroup regardless of its inclusion in any array or not
 if ($PSBoundParameters.ContainsKey("TrusteeUser")) {
     try {
-        Add-ADGroupMember -Identity $groupCache["TrusteeGroup"].DistinguishedName -Members $TrusteeUser -ErrorAction Stop
+        Add-ADGroupMember -Identity $objectCache["TrusteeGroup"].DistinguishedName -Members $TrusteeUser -ErrorAction Stop
     } catch {
         throw "Unable to add specified trustee user '$TrusteeUser' to TrusteeGroup: $($_.Exception.Message)"
     }
 }
 
 $selfSid = 'S-1-5-10'
-$trusteeSid = $groupCache["TrusteeGroup"].SID
+$trusteeSid = $objectCache["TrusteeGroup"].SID
+
 $membershipPropertySetGuid = Get-ControlAccessGuid -DisplayName "Membership"
 $memberAttributeGuid = Get-SchemaGuid -LdapDisplayName "member"
-$selfMembershipGuid = Get-ControlAccessGuid -DisplayName "Self-Membership"
+
+$SelfMembershipGuid = Get-ControlAccessGuid -DisplayName "Self-Membership"
+$ValidatedDNSHostNameGuid = Get-ControlAccessGuid -DisplayName "Validated-DNS-Host-Name"
+$ValidatedAdditionalDNSGuid = Get-ControlAccessGuid -DisplayName "Validated-MS-DS-Additional-DNS-Host-Name"
+$ValidatedBehaviorVersionGuid = Get-ControlAccessGuid -DisplayName "Validated-MS-DS-Behavior-Version"
+$ValidatedSPNGuid = Get-ControlAccessGuid -DisplayName "Validated-SPN"
+$ValildatedWriteComputerGuid = Get-ControlAccessGuid -DisplayName "DS-Validated-Write-Computer"
 
 $aceDefinitions = @(
-    @{ Name = "GenericAllAll"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::GenericAll; Trustee = $trusteeSid },
-    @{ Name = "GenericWriteAll"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::GenericWrite; Trustee = $trusteeSid  },
-    @{ Name = "WritePropertyAll"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::WriteProperty; Trustee = $trusteeSid  },
-    @{ Name = "GenericAllMembershipPropertySet"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::GenericAll; ObjectGuid = $membershipPropertySetGuid; Trustee = $trusteeSid   },    
-    @{ Name = "GenericWriteMembershipPropertySet"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::GenericWrite; ObjectGuid = $membershipPropertySetGuid; Trustee = $trusteeSid   },    
-    @{ Name = "WritePropertyMembershipPropertySet"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::WriteProperty; ObjectGuid = $membershipPropertySetGuid; Trustee = $trusteeSid  },
-    @{ Name = "GenericAllPropertyMember"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::GenericAll; ObjectGuid = $memberAttributeGuid; Trustee = $trusteeSid  },    
-    @{ Name = "GenericWritePropertyMember"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::GenericWrite; ObjectGuid = $memberAttributeGuid; Trustee = $trusteeSid  },    
-    @{ Name = "WritePropertyMember"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::WriteProperty; ObjectGuid = $memberAttributeGuid; Trustee = $trusteeSid  },
-    @{ Name = "AllValidatedWrites"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; Trustee = $trusteeSid  },
-    @{ Name = "SelfMembership"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $selfMembershipGuid; Trustee = $trusteeSid  },
-    @{ Name = "SelfMembershipPropertySet"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $membershipPropertySetGuid; Trustee = $trusteeSid  }, # Testing with property set on VW     
-    @{ Name = "SelfMembershipSelf"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $selfMembershipGuid; Trustee = $selfSid },
-    @{ Name = "AllValidatedWritesSelf"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; Trustee = $selfSid }     
+    @{ Name = "SelfMembership"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $selfMembershipGuid},
+    @{ Name = "ValidatedDNSHostName"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $selfMembershipGuid},   
+    @{ Name = "ValidatedAdditionalDNS"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $selfMembershipGuid},   
+    @{ Name = "ValidatedBehaviorVersion"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $selfMembershipGuid}, 
+    @{ Name = "ValidatedSPN"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $selfMembershipGuid},  
+    @{ Name = "ValildatedWriteComputer"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $selfMembershipGuid},                         
+    @{ Name = "AllValidatedWrites"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self}   
 )
 
+<# TODO  Iterate through the $objectCache instead of $aceDefinitions and add the corresponding $aceDefinition for the $objectCache item
+ with a TrusteeSid that corresponds to the _$trustee at the end of the objectCache name.
+
+#>
 foreach ($definition in $aceDefinitions) {
-    $targetDn = $groupCache[$definition.Name].DistinguishedName
+    $targetDn = $objectCache[$definition.Name].DistinguishedName
     $objectGuid = if ($definition.ContainsKey("ObjectGuid")) { $definition.ObjectGuid } else { [Guid]::Empty }
     Set-TrusteeAccessRule -TargetDistinguishedName $targetDn -TrusteeSid $($definition.Trustee) -Rights $definition.Rights -ObjectType $objectGuid
 }
 
-$controlUserDn = "CN=ControlUser,$($membership.DistinguishedName)"
+$controlUserDn = "CN=ControlUser,$($ou.DistinguishedName)"
 try {
     $controlUser = Get-ADUser -Identity $controlUserDn -Properties Enabled -ErrorAction Stop
 } catch [Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException] {
@@ -232,12 +253,12 @@ try {
 }
 if (-not $controlUser) {
     $password = Read-Host -Prompt "Enter password for ControlUser" -AsSecureString
-    New-ADUser -Name "ControlUser" -SamAccountName "ControlUser" -UserPrincipalName "ControlUser@$(Get-ADDomain).DNSRoot" -AccountPassword $password -Enabled $true -ChangePasswordAtLogon $false -PasswordNeverExpires $false -Path $membership.DistinguishedName
+    New-ADUser -Name "ControlUser" -SamAccountName "ControlUser" -UserPrincipalName "ControlUser@$(Get-ADDomain).DNSRoot" -AccountPassword $password -Enabled $true -ChangePasswordAtLogon $false -PasswordNeverExpires $false -Path $ou.DistinguishedName
 } else {
     if (-not $controlUser.Enabled) {
         Set-ADUser -Identity $controlUser -Enabled $true
         Write-Verbose "ControlUser re-enabled."
     } else {
-        Write-Verbose "ControlUser already exists in $($membership.DistinguishedName)."
+        Write-Verbose "ControlUser already exists in $($ou.DistinguishedName)."
     }
 }

@@ -200,25 +200,6 @@ function New-KeyCredentialValue {
         return $null
     }
 
-    $subjectIdentifier = $null
-    if ($AdObject.objectSid) {
-        try {
-            $sid = New-Object System.Security.Principal.SecurityIdentifier($AdObject.objectSid, 0)
-            $subjectIdentifier = $sid.Value
-        } catch {
-            Write-Verbose ("Unable to convert objectSid for {0}: {1}" -f $AdObject.Name, $_.Exception.Message)
-        }
-    }
-    if (-not $subjectIdentifier -and $AdObject.SamAccountName) {
-        $subjectIdentifier = $AdObject.SamAccountName
-    }
-    if (-not $subjectIdentifier) {
-        $subjectIdentifier = $AdObject.Name
-    }
-    if (-not $subjectIdentifier) {
-        $subjectIdentifier = [Guid]::NewGuid().ToString()
-    }
-
     $certificateParams = @{
         Subject            = 'itdoesnotreallymatteratall'
         KeyLength          = 2048

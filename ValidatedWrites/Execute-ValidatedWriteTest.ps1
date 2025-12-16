@@ -19,6 +19,7 @@ if ($transcriptDirectory -and -not (Test-Path -LiteralPath $transcriptDirectory)
 }
 
 Import-Module ActiveDirectory -ErrorAction Stop
+Import-Module DSInternals -ErrorAction Stop
 
 function Get-LeafObjectClass {
     param(
@@ -190,141 +191,78 @@ function Invoke-SpnTest {
     }
 }
 
-function Write-KeyCredentialEntry {
+function New-KeyCredentialValue {
     param(
-        [Parameter(Mandatory)]
-        [System.IO.BinaryWriter]$Writer,
-
-        [Parameter(Mandatory)]
-        [byte]$EntryType,
-
-        [Parameter(Mandatory)]
-        [byte[]]$Value
+        [Microsoft.ActiveDirectory.Management.ADObject]$AdObject
     )
 
-    $Writer.Write([UInt16]$Value.Length)
-    $Writer.Write($EntryType)
-    $Writer.Write($Value)
-}
-
-function New-RsaPublicKeyBlob {
-    param(
-        [int]$KeySize = 2048
-    )
-
-    $rsa = [System.Security.Cryptography.RSA]::Create($KeySize)
-    try {
-        $parameters = $rsa.ExportParameters($false)
-    } finally {
-        if ($rsa) {
-            $rsa.Dispose()
-        }
+    if (-not $AdObject) {
+        return $null
     }
 
-    $modulus = $parameters.Modulus
-    $exponent = $parameters.Exponent
-
-    $memoryStream = New-Object System.IO.MemoryStream
-    $writer = New-Object System.IO.BinaryWriter($memoryStream)
-    try {
-        $writer.Write([UInt32]0x31415352) # "RSA1"
-        $writer.Write([UInt32]($modulus.Length * 8))
-        $writer.Write([UInt32]$exponent.Length)
-        $writer.Write([UInt32]$modulus.Length)
-        $writer.Write([UInt32]0) # cbPrime1
-        $writer.Write([UInt32]0) # cbPrime2
-        $writer.Write($exponent)
-        $writer.Write($modulus)
-        $writer.Flush()
-        return $memoryStream.ToArray()
-    } finally {
-        $writer.Dispose()
-        $memoryStream.Dispose()
-    }
-}
-
-function New-ShadowCredentialBlob {
-    $creationTime = [DateTime]::UtcNow
-    $keyMaterial = New-RsaPublicKeyBlob
-    $deviceId = [Guid]::NewGuid()
-    $deviceBytes = $deviceId.ToByteArray()
-    $creationBytes = [BitConverter]::GetBytes($creationTime.ToFileTimeUtc())
-
-    $keyUsageBytes = New-Object byte[] 1
-    $keyUsageBytes[0] = 0x01
-    $keySourceBytes = New-Object byte[] 1
-    $keySourceBytes[0] = 0x00
-
-    $sha256 = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $keyIdentifierBytes = $sha256.ComputeHash($keyMaterial)
-
-        $propertyStream = New-Object System.IO.MemoryStream
-        $propertyWriter = New-Object System.IO.BinaryWriter($propertyStream)
+    $subjectIdentifier = $null
+    if ($AdObject.objectSid) {
         try {
-            Write-KeyCredentialEntry -Writer $propertyWriter -EntryType 0x03 -Value $keyMaterial
-            Write-KeyCredentialEntry -Writer $propertyWriter -EntryType 0x04 -Value $keyUsageBytes
-            Write-KeyCredentialEntry -Writer $propertyWriter -EntryType 0x05 -Value $keySourceBytes
-            Write-KeyCredentialEntry -Writer $propertyWriter -EntryType 0x06 -Value $deviceBytes
-            Write-KeyCredentialEntry -Writer $propertyWriter -EntryType 0x09 -Value $creationBytes
-            $propertyWriter.Flush()
-            $propertyBytes = $propertyStream.ToArray()
-        } finally {
-            $propertyWriter.Dispose()
-            $propertyStream.Dispose()
+            $sid = New-Object System.Security.Principal.SecurityIdentifier($AdObject.objectSid, 0)
+            $subjectIdentifier = $sid.Value
+        } catch {
+            Write-Verbose ("Unable to convert objectSid for {0}: {1}" -f $AdObject.Name, $_.Exception.Message)
         }
-
-        $keyHashBytes = $sha256.ComputeHash($propertyBytes)
-
-        $blobStream = New-Object System.IO.MemoryStream
-        $blobWriter = New-Object System.IO.BinaryWriter($blobStream)
-        try {
-            $blobWriter.Write([UInt32]0x00000200) # Version 2
-            Write-KeyCredentialEntry -Writer $blobWriter -EntryType 0x01 -Value $keyIdentifierBytes
-            Write-KeyCredentialEntry -Writer $blobWriter -EntryType 0x02 -Value $keyHashBytes
-            $blobWriter.Write($propertyBytes)
-            $blobWriter.Flush()
-            return $blobStream.ToArray()
-        } finally {
-            $blobWriter.Dispose()
-            $blobStream.Dispose()
-        }
-    } finally {
-        $sha256.Dispose()
     }
-}
+    if (-not $subjectIdentifier -and $AdObject.SamAccountName) {
+        $subjectIdentifier = $AdObject.SamAccountName
+    }
+    if (-not $subjectIdentifier) {
+        $subjectIdentifier = $AdObject.Name
+    }
+    if (-not $subjectIdentifier) {
+        $subjectIdentifier = [Guid]::NewGuid().ToString()
+    }
 
-function New-DnWithBinaryValue {
-    param(
-        [Parameter(Mandatory)]
-        [byte[]]$BinaryData,
+    $certificateParams = @{
+        Subject            = 'itdoesnotreallymatteratall'
+        KeyLength          = 2048
+        Provider           = 'Microsoft Strong Cryptographic Provider'
+        CertStoreLocation  = 'Cert:\CurrentUser\My'
+        NotAfter           = (Get-Date).AddYears(5)
+        TextExtension      = @('2.5.29.19={text}false', '2.5.29.37={text}1.3.6.1.4.1.311.20.2.2')
+        SuppressOid        = '2.5.29.14'
+        KeyUsage           = 'None'
+        KeyExportPolicy    = 'Exportable'
+       # HashAlgorithm      = 'SHA256'
+    }
 
-        [Parameter(Mandatory)]
-        [string]$DistinguishedName
-    )
-
-    if (-not $BinaryData -or [string]::IsNullOrWhiteSpace($DistinguishedName)) {
+    $certificate = New-SelfSignedCertificate @certificateParams
+    if (-not $certificate) {
+        Write-Warning ("    Unable to generate self-signed certificate for {0}; skipping key credential write." -f $AdObject.Name)
         return $null
     }
 
     try {
-        return New-Object Microsoft.ActiveDirectory.Management.ADDNWithBinary ($DistinguishedName, $BinaryData)
-    } catch {
-        Write-Verbose ("Failed to create ADDNWithBinary value for {0}: {1}" -f $DistinguishedName, $_.Exception.Message)
-    }
+        $keyParams = @{
+            Certificate = $certificate
+            OwnerDN     = $AdObject.DistinguishedName
+            IsComputerKey = $true
+        }
 
-    try {
-        return New-Object System.DirectoryServices.ActiveDirectory.DNWithBinary ($DistinguishedName, $BinaryData)
-    } catch {
-        Write-Verbose ("Failed to create DNWithBinary value for {0}: {1}" -f $DistinguishedName, $_.Exception.Message)
-    }
+        $ngcKey = Get-ADKeyCredential @keyParams
+        if (-not $ngcKey) {
+            Write-Warning ("    Unable to create key credential for {0}." -f $AdObject.Name)
+            return $null
+        }
 
-    try {
-        $hex = [System.BitConverter]::ToString($BinaryData).Replace("-", "")
-        return "B:{0}:{1}:{2}" -f $BinaryData.Length, $hex, $DistinguishedName
+        return $ngcKey.ToDNWithBinary()
     } catch {
-        Write-Verbose ("Failed to format DN-Binary string for {0}: {1}" -f $DistinguishedName, $_.Exception.Message)
+        Write-Warning ("    Failed to build key credential value for {0}: {1}" -f $AdObject.Name, $_.Exception.Message)
         return $null
+    } finally {
+        if ($certificate) {
+            try {
+                Remove-Item -LiteralPath ("Cert:\CurrentUser\My\{0}" -f $certificate.Thumbprint) -Force -ErrorAction SilentlyContinue
+            } catch {
+                Write-Verbose ("Unable to remove temporary certificate {0}: {1}" -f $certificate.Thumbprint, $_.Exception.Message)
+            }
+        }
     }
 }
 
@@ -334,24 +272,25 @@ function Invoke-KeyCredentialWriteTest {
     )
 
     $dn = $AdObject.DistinguishedName
-    $blob = New-ShadowCredentialBlob
-    $dnBinaryValue = New-DnWithBinaryValue -BinaryData $blob -DistinguishedName $dn
-    if (-not $dnBinaryValue) {
+    $sam = $AdObject.SamAccountName
+    $keyCredentialValue = New-KeyCredentialValue -AdObject $AdObject
+    if (-not $keyCredentialValue) {
         Write-Warning ("    Failed to construct DN-Binary value for {0}; skipping msDS-KeyCredentialLink write." -f $AdObject.Name)
         return
     }
 
     $addSucceeded = $false
     try {
-        Set-ADObject -Identity $dn -Add @{ 'msDS-KeyCredentialLink' = $dnBinaryValue } -ErrorAction Stop
+        Set-ADObject -Identity $dn -Clear 'msDS-KeyCredentialLink' -Add @{ 'msDS-KeyCredentialLink' = $keyCredentialValue } -ErrorAction Stop
+        # Set-ADComputer
         $addSucceeded = $true
-        Write-Host ("    Added placeholder msDS-KeyCredentialLink ({0} bytes)." -f $blob.Length)
+        Write-Host "    Added placeholder msDS-KeyCredentialLink."
     } catch {
         Write-Warning ("    Failed to modify msDS-KeyCredentialLink on {0}: {1}" -f $AdObject.Name, $_.Exception.Message)
     } finally {
         if ($addSucceeded) {
             try {
-                Set-ADObject -Identity $dn -Remove @{ 'msDS-KeyCredentialLink' = $dnBinaryValue } -ErrorAction Stop
+                Set-ADObject -Identity $dn -Remove @{ 'msDS-KeyCredentialLink' = $keyCredentialValue } -ErrorAction Stop
                 Write-Host "    Removed placeholder msDS-KeyCredentialLink to revert state."
             } catch {
                 Write-Warning ("    Unable to clean up msDS-KeyCredentialLink on {0}: {1}" -f $AdObject.Name, $_.Exception.Message)
@@ -442,7 +381,8 @@ $propertiesToLoad = @(
     'servicePrincipalName',
     'msDS-KeyCredentialLink',
     'samAccountName',
-    'msDS-AdditionalSamAccountName'
+    'msDS-AdditionalSamAccountName',
+    'objectSid'
 )
 
 $rawObjects = Get-ADObject -SearchBase $OrganizationalUnitDN -SearchScope OneLevel -Filter * -Properties $propertiesToLoad -ErrorAction Stop |

@@ -138,6 +138,30 @@ function New-SamAccountName {
     return $prefix + $hash.Substring(0, $suffixLength)
 }
 
+function Set-AdditionalSamAccountName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$DistinguishedName,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$SamAccountName,
+
+        [int]$MaxLength = 20
+    )
+
+    $additionalSamBase = "{0}_additional" -f $SamAccountName
+    $additionalSam = New-SamAccountName -BaseName $additionalSamBase -MaxLength $MaxLength
+
+    try {
+        Set-ADObject -Identity $DistinguishedName -Replace @{ 'msDS-AdditionalSamAccountName' = $additionalSam } -ErrorAction Stop
+    } catch {
+        Write-Verbose ("Failed to set msDS-AdditionalSamAccountName on {0}: {1}" -f $DistinguishedName, $_.Exception.Message)
+    }
+}
+
 function Set-TrusteeAccessRule {
     [CmdletBinding()]
     param(
@@ -236,8 +260,10 @@ foreach ($validatedWriteName in $validatedWriteNames) {
             $objectName = "{0}_{1}_{2}" -f $validatedWriteName, $testToken, $trusteeToken
             $distinguishedName = "CN=$objectName,$($ou.DistinguishedName)"
             $object = $null
+            $testObjectKey = $testObject.ToLowerInvariant()
+            $samAccountNameMaxLength = if ($testObjectKey -in @('computer', 'msds-groupmanagedserviceaccount')) { 15 } else { 20 }
 
-            switch ($testObject.ToLowerInvariant()) {
+            switch ($testObjectKey) {
                 'user' {
                     try {
                         $object = Get-ADUser -Identity $distinguishedName -ErrorAction Stop
@@ -285,13 +311,17 @@ foreach ($validatedWriteName in $validatedWriteNames) {
 
                     if (-not $object) {
                         $samAccountName = New-SamAccountName -BaseName $objectName -MaxLength 15
-                        $dnsHostName = "{0}.{1}" -f $objectName.ToLowerInvariant(), $dnsRoot
+                        $dnsHostName = "{0}{1}.{2}" -f 'gMSA', $trusteeToken, $dnsRoot
                         $object = New-ADServiceAccount -Name $objectName -SamAccountName $samAccountName -DNSHostName $dnsHostName -PrincipalsAllowedToRetrieveManagedPassword $domainControllersGroup.DistinguishedName -Path $ou.DistinguishedName -PassThru
                     }
                 }
                 default {
                     throw "Unsupported test object type '$testObject'."
                 }
+            }
+
+            if ($object -and $object.SamAccountName) {
+                Set-AdditionalSamAccountName -DistinguishedName $object.DistinguishedName -SamAccountName $object.SamAccountName -MaxLength $samAccountNameMaxLength
             }
 
             $objectCache[$objectName] = $object

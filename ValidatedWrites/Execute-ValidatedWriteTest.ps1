@@ -158,41 +158,18 @@ function Get-FirstAttributeStringValue {
     return $stringValue.ToLowerInvariant()
 }
 
-function Get-SpnHostComponent {
-    param(
-        [Microsoft.ActiveDirectory.Management.ADObject]$AdObject
-    )
-
-    $sources = @(
-        @{ Value = $AdObject.'msDS-AdditionalSamAccountName'; TrimDollar = $false },
-        @{ Value = $AdObject.'dNSHostName'; TrimDollar = $false },
-        @{ Value = $AdObject.'msDS-AdditionalDnsHostName'; TrimDollar = $false },
-        @{ Value = $AdObject.SamAccountName; TrimDollar = $true }
-    )
-
-    foreach ($source in $sources) {
-        $candidate = Get-FirstAttributeStringValue -Value $source.Value -TrimDollarSuffix:$source.TrimDollar
-        if ($candidate) {
-            return $candidate
-        }
-    }
-
-    return $null
-}
-
 function Invoke-SpnTest {
     param(
         [Microsoft.ActiveDirectory.Management.ADObject]$AdObject
     )
 
-    $hostComponent = Get-SpnHostComponent -AdObject $AdObject
-    if (-not $hostComponent) {
-        Write-Warning ("    Skipping SPN write for {0}; no valid hostname candidate was found." -f $AdObject.Name)
+    $samBase = Get-FirstAttributeStringValue -Value $AdObject.SamAccountName -TrimDollarSuffix
+    if (-not $samBase) {
+        Write-Warning ("    Skipping SPN write for {0}; SamAccountName is not available." -f $AdObject.Name)
         return
     }
 
-    $serviceSuffix = "vw-{0}" -f (Get-Random -Minimum 1000 -Maximum 9999)
-    $newSpn = "TEST/{0}/{1}" -f $hostComponent, $serviceSuffix
+    $newSpn = "TEST/{0}" -f $samBase
     $dn = $AdObject.DistinguishedName
     $addSucceeded = $false
     try {
@@ -200,7 +177,7 @@ function Invoke-SpnTest {
         $addSucceeded = $true
         Write-Host "    Added SPN $newSpn."
     } catch {
-        Write-Warning ("    Failed to add SPN on {0}: {1}" -f $AdObject.Name, $_.Exception.Message)
+        Write-Warning ("    Failed to add SPN on {0} (value: {1}): {2}" -f $AdObject.Name, $newSpn, $_.Exception.Message)
     } finally {
         if ($addSucceeded) {
             try {
@@ -317,6 +294,40 @@ function New-ShadowCredentialBlob {
     }
 }
 
+function New-DnWithBinaryValue {
+    param(
+        [Parameter(Mandatory)]
+        [byte[]]$BinaryData,
+
+        [Parameter(Mandatory)]
+        [string]$DistinguishedName
+    )
+
+    if (-not $BinaryData -or [string]::IsNullOrWhiteSpace($DistinguishedName)) {
+        return $null
+    }
+
+    try {
+        return New-Object Microsoft.ActiveDirectory.Management.ADDNWithBinary ($DistinguishedName, $BinaryData)
+    } catch {
+        Write-Verbose ("Failed to create ADDNWithBinary value for {0}: {1}" -f $DistinguishedName, $_.Exception.Message)
+    }
+
+    try {
+        return New-Object System.DirectoryServices.ActiveDirectory.DNWithBinary ($DistinguishedName, $BinaryData)
+    } catch {
+        Write-Verbose ("Failed to create DNWithBinary value for {0}: {1}" -f $DistinguishedName, $_.Exception.Message)
+    }
+
+    try {
+        $hex = [System.BitConverter]::ToString($BinaryData).Replace("-", "")
+        return "B:{0}:{1}:{2}" -f $BinaryData.Length, $hex, $DistinguishedName
+    } catch {
+        Write-Verbose ("Failed to format DN-Binary string for {0}: {1}" -f $DistinguishedName, $_.Exception.Message)
+        return $null
+    }
+}
+
 function Invoke-KeyCredentialWriteTest {
     param(
         [Microsoft.ActiveDirectory.Management.ADObject]$AdObject
@@ -324,9 +335,15 @@ function Invoke-KeyCredentialWriteTest {
 
     $dn = $AdObject.DistinguishedName
     $blob = New-ShadowCredentialBlob
+    $dnBinaryValue = New-DnWithBinaryValue -BinaryData $blob -DistinguishedName $dn
+    if (-not $dnBinaryValue) {
+        Write-Warning ("    Failed to construct DN-Binary value for {0}; skipping msDS-KeyCredentialLink write." -f $AdObject.Name)
+        return
+    }
+
     $addSucceeded = $false
     try {
-        Set-ADObject -Identity $dn -Add @{ 'msDS-KeyCredentialLink' = $blob } -ErrorAction Stop
+        Set-ADObject -Identity $dn -Add @{ 'msDS-KeyCredentialLink' = $dnBinaryValue } -ErrorAction Stop
         $addSucceeded = $true
         Write-Host ("    Added placeholder msDS-KeyCredentialLink ({0} bytes)." -f $blob.Length)
     } catch {
@@ -334,7 +351,7 @@ function Invoke-KeyCredentialWriteTest {
     } finally {
         if ($addSucceeded) {
             try {
-                Set-ADObject -Identity $dn -Remove @{ 'msDS-KeyCredentialLink' = $blob } -ErrorAction Stop
+                Set-ADObject -Identity $dn -Remove @{ 'msDS-KeyCredentialLink' = $dnBinaryValue } -ErrorAction Stop
                 Write-Host "    Removed placeholder msDS-KeyCredentialLink to revert state."
             } catch {
                 Write-Warning ("    Unable to clean up msDS-KeyCredentialLink on {0}: {1}" -f $AdObject.Name, $_.Exception.Message)

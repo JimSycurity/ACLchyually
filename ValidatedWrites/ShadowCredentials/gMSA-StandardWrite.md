@@ -278,3 +278,63 @@ StreetAddress            :
 
 
 PS C:\tools> 
+
+PS C:\tools> $OU = Get-ADOrganizationalUnit -Identity "OU=TestOU-TestGMSA2,OU=ShadowCreds2,OU=Misconfigs,DC=mindfreak,DC=lab,DC=lan" -Properties *
+
+PS C:\tools> $OU.nTSecurityDescriptor.Access
+
+
+ActiveDirectoryRights : GenericRead
+InheritanceType       : None
+ObjectType            : 00000000-0000-0000-0000-000000000000
+InheritedObjectType   : 00000000-0000-0000-0000-000000000000
+ObjectFlags           : None
+AccessControlType     : Allow
+IdentityReference     : NT AUTHORITY\ENTERPRISE DOMAIN CONTROLLERS
+IsInherited           : False
+InheritanceFlags      : None
+PropagationFlags      : None
+
+ActiveDirectoryRights : GenericRead
+InheritanceType       : None
+ObjectType            : 00000000-0000-0000-0000-000000000000
+InheritedObjectType   : 00000000-0000-0000-0000-000000000000
+ObjectFlags           : None
+AccessControlType     : Allow
+IdentityReference     : NT AUTHORITY\Authenticated Users
+IsInherited           : False
+InheritanceFlags      : None
+PropagationFlags      : None
+
+ActiveDirectoryRights : GenericAll
+InheritanceType       : None
+ObjectType            : 00000000-0000-0000-0000-000000000000
+InheritedObjectType   : 00000000-0000-0000-0000-000000000000
+ObjectFlags           : None
+AccessControlType     : Allow
+IdentityReference     : NT AUTHORITY\SYSTEM
+IsInherited           : False
+InheritanceFlags      : None
+PropagationFlags      : None
+
+ActiveDirectoryRights : GenericAll
+InheritanceType       : None
+ObjectType            : 00000000-0000-0000-0000-000000000000
+InheritedObjectType   : 00000000-0000-0000-0000-000000000000
+ObjectFlags           : None
+AccessControlType     : Allow
+IdentityReference     : MINDFREAK\Domain Admins
+IsInherited           : False
+InheritanceFlags      : None
+PropagationFlags      : None
+
+ActiveDirectoryRights : GenericAll
+InheritanceType       : All
+ObjectType            : 00000000-0000-0000-0000-000000000000
+InheritedObjectType   : 00000000-0000-0000-0000-000000000000
+ObjectFlags           : None
+AccessControlType     : Allow
+IdentityReference     : MINDFREAK\testGMSA2$
+IsInherited           : False
+InheritanceFlags      : ContainerInherit
+PropagationFlags      : None

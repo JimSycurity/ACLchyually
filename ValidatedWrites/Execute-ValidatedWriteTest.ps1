@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$OrganizationalUnitDN = "OU=ValidatedWrites,OU=Misconfigs,DC=corp1,DC=lab,DC=home-labs,DC=lol",
-    [string]$TranscriptPath
+    [string]$TranscriptPath,
+    [string]$DomainController
 )
 
 if ([string]::IsNullOrWhiteSpace($OrganizationalUnitDN)) {
@@ -20,6 +21,26 @@ if ($transcriptDirectory -and -not (Test-Path -LiteralPath $transcriptDirectory)
 
 Import-Module ActiveDirectory -ErrorAction Stop
 Import-Module DSInternals -ErrorAction Stop
+
+$script:DirectoryServer = $null
+$script:ADServerParams = @{}
+
+$initialDomainInfo = $null
+try {
+    $initialDomainInfo = Get-ADDomain -ErrorAction Stop
+} catch {
+    throw "Unable to query domain information: $($_.Exception.Message)"
+}
+
+if (-not [string]::IsNullOrWhiteSpace($DomainController)) {
+    $script:DirectoryServer = $DomainController.Trim()
+} elseif ($initialDomainInfo -and -not [string]::IsNullOrWhiteSpace($initialDomainInfo.PDCEmulator)) {
+    $script:DirectoryServer = $initialDomainInfo.PDCEmulator
+}
+
+if ($script:DirectoryServer) {
+    $script:ADServerParams = @{ Server = $script:DirectoryServer }
+}
 
 function Get-LeafObjectClass {
     param(
@@ -78,24 +99,24 @@ function Invoke-DnsHostNameTest {
     }
 
     $dn = $AdObject.DistinguishedName
-    $originalValue = $currentValue
     try {
-        Set-ADObject -Identity $dn -Replace @{ 'dNSHostName' = $targetValue } -ErrorAction Stop
+        Set-ADObject @script:ADServerParams -Identity $dn -Replace @{ 'dNSHostName' = $targetValue } -ErrorAction Stop
         Write-Host "    Successfully set dNSHostName to $targetValue."
     } catch {
-        Write-Warning ("    Failed to set dNSHostName on {0}: {1}" -f $AdObject.Name, $_.Exception.Message)
+        Write-Warning ("    Failed to set {2} dNSHostName on {0}: {1}" -f $AdObject.Name, $_.Exception.Message, $targetValue)
         return
     }
 
     try {
-        if ([string]::IsNullOrWhiteSpace($originalValue)) {
-            Set-ADObject -Identity $dn -Clear 'dNSHostName' -ErrorAction Stop
+        $refreshed = Get-ADObject @script:ADServerParams -Identity $dn -Properties 'dNSHostName' -ErrorAction Stop
+        $updatedValue = $refreshed.'dNSHostName'
+        if ($updatedValue -eq $targetValue) {
+            Write-Host ("    Verified dNSHostName is {0}." -f $updatedValue)
         } else {
-            Set-ADObject -Identity $dn -Replace @{ 'dNSHostName' = $originalValue } -ErrorAction Stop
+            Write-Warning ("    Expected dNSHostName {0}, but retrieved {1}." -f $targetValue, $updatedValue)
         }
-        Write-Host "    Reverted dNSHostName to original value."
     } catch {
-        Write-Warning ("    Unable to revert dNSHostName on {0}: {1}" -f $AdObject.Name, $_.Exception.Message)
+        Write-Warning ("    Unable to read back dNSHostName on {0}: {1}" -f $AdObject.Name, $_.Exception.Message)
     }
 }
 
@@ -109,18 +130,26 @@ function Invoke-AdditionalDnsTest {
     $valueToAdd = "{0}-additional-{1}.{2}" -f $AdObject.Name.ToLowerInvariant(), (Get-Random -Minimum 1000 -Maximum 9999), $DnsRoot
     $addSucceeded = $false
     try {
-        Set-ADObject -Identity $dn -Add @{ 'msDS-AdditionalDnsHostName' = $valueToAdd } -ErrorAction Stop
+        Set-ADObject @script:ADServerParams -Identity $dn -Add @{ 'msDS-AdditionalDnsHostName' = $valueToAdd } -ErrorAction Stop
         $addSucceeded = $true
         Write-Host "    Added msDS-AdditionalDnsHostName value $valueToAdd."
     } catch {
-        Write-Warning ("    Failed to add msDS-AdditionalDnsHostName on {0}: {1}" -f $AdObject.Name, $_.Exception.Message)
+        Write-Warning ("    Failed to add {2} msDS-AdditionalDnsHostName on {0}: {1}" -f $AdObject.Name, $_.Exception.Message, $valueToAdd)
     } finally {
         if ($addSucceeded) {
             try {
-                Set-ADObject -Identity $dn -Remove @{ 'msDS-AdditionalDnsHostName' = $valueToAdd } -ErrorAction Stop
-                Write-Host "    Removed temporary msDS-AdditionalDnsHostName value."
+                $refreshed = Get-ADObject @script:ADServerParams -Identity $dn -Properties 'msDS-AdditionalDnsHostName' -ErrorAction Stop
+                $currentValues = @($refreshed.'msDS-AdditionalDnsHostName')
+                if ($currentValues -and $currentValues -contains $valueToAdd) {
+                    Write-Host "    Verified msDS-AdditionalDnsHostName includes:"
+                    foreach ($value in $currentValues) {
+                        Write-Host ("        {0}" -f $value)
+                    }
+                } else {
+                    Write-Warning ("    Added value {0} was not found in msDS-AdditionalDnsHostName after write." -f $valueToAdd)
+                }
             } catch {
-                Write-Warning ("    Unable to remove msDS-AdditionalDnsHostName from {0}: {1}" -f $AdObject.Name, $_.Exception.Message)
+                Write-Warning ("    Unable to read back msDS-AdditionalDnsHostName on {0}: {1}" -f $AdObject.Name, $_.Exception.Message)
             }
         }
     }
@@ -174,7 +203,7 @@ function Invoke-SpnTest {
     $dn = $AdObject.DistinguishedName
     $addSucceeded = $false
     try {
-        Set-ADObject -Identity $dn -Add @{ servicePrincipalName = $newSpn } -ErrorAction Stop
+        Set-ADObject @script:ADServerParams -Identity $dn -Add @{ servicePrincipalName = $newSpn } -ErrorAction Stop
         $addSucceeded = $true
         Write-Host "    Added SPN $newSpn."
     } catch {
@@ -182,10 +211,18 @@ function Invoke-SpnTest {
     } finally {
         if ($addSucceeded) {
             try {
-                Set-ADObject -Identity $dn -Remove @{ servicePrincipalName = $newSpn } -ErrorAction Stop
-                Write-Host "    Removed temporary SPN."
+                $refreshed = Get-ADObject @script:ADServerParams -Identity $dn -Properties 'servicePrincipalName' -ErrorAction Stop
+                $currentSpns = @($refreshed.servicePrincipalName)
+                if ($currentSpns -and $currentSpns -contains $newSpn) {
+                    Write-Host "    Verified servicePrincipalName includes:"
+                    foreach ($spn in $currentSpns) {
+                        Write-Host ("        {0}" -f $spn)
+                    }
+                } else {
+                    Write-Warning ("    Added SPN {0} was not returned when reading servicePrincipalName." -f $newSpn)
+                }
             } catch {
-                Write-Warning ("    Unable to remove SPN from {0}: {1}" -f $AdObject.Name, $_.Exception.Message)
+                Write-Warning ("    Unable to read back servicePrincipalName on {0}: {1}" -f $AdObject.Name, $_.Exception.Message)
             }
         }
     }
@@ -262,7 +299,8 @@ function Invoke-KeyCredentialWriteTest {
 
     $addSucceeded = $false
     try {
-        Set-ADObject -Identity $dn -Clear 'msDS-KeyCredentialLink' -Add @{ 'msDS-KeyCredentialLink' = $keyCredentialValue } -ErrorAction Stop
+        Write-Host ("    Setting msDS-KeyCredentialLink to:`n        {0}" -f $keyCredentialValue)
+        Set-ADObject @script:ADServerParams -Identity $dn -Clear 'msDS-KeyCredentialLink' -Add @{ 'msDS-KeyCredentialLink' = $keyCredentialValue } -ErrorAction Stop
         # Set-ADComputer
         $addSucceeded = $true
         Write-Host "    Added placeholder msDS-KeyCredentialLink."
@@ -271,10 +309,18 @@ function Invoke-KeyCredentialWriteTest {
     } finally {
         if ($addSucceeded) {
             try {
-                Set-ADObject -Identity $dn -Remove @{ 'msDS-KeyCredentialLink' = $keyCredentialValue } -ErrorAction Stop
-                Write-Host "    Removed placeholder msDS-KeyCredentialLink to revert state."
+                $refreshed = Get-ADObject @script:ADServerParams -Identity $dn -Properties 'msDS-KeyCredentialLink' -ErrorAction Stop
+                $currentValues = @($refreshed.'msDS-KeyCredentialLink')
+                if ($currentValues -and $currentValues -contains $keyCredentialValue) {
+                    Write-Host "    Verified msDS-KeyCredentialLink contains:"
+                    foreach ($value in $currentValues) {
+                        Write-Host ("        {0}" -f $value)
+                    }
+                } else {
+                    Write-Warning ("    Added msDS-KeyCredentialLink value was not found when reading the object.")
+                }
             } catch {
-                Write-Warning ("    Unable to clean up msDS-KeyCredentialLink on {0}: {1}" -f $AdObject.Name, $_.Exception.Message)
+                Write-Warning ("    Unable to read back msDS-KeyCredentialLink on {0}: {1}" -f $AdObject.Name, $_.Exception.Message)
             }
         }
     }
@@ -320,7 +366,7 @@ function Write-GroupMembership {
 
     Write-Host $Heading
     try {
-        $members = Get-ADGroupMember -Identity $GroupIdentity -ErrorAction Stop
+        $members = Get-ADGroupMember @script:ADServerParams -Identity $GroupIdentity -ErrorAction Stop
     } catch {
         Write-Warning ("    Unable to retrieve membership for {0}: {1}" -f $GroupIdentity, $_.Exception.Message)
         return
@@ -336,11 +382,27 @@ function Write-GroupMembership {
     }
 }
 
-$domainInfo = Get-ADDomain
+$domainInfo = $initialDomainInfo
+if ($script:DirectoryServer) {
+    try {
+        $domainInfo = Get-ADDomain @script:ADServerParams
+    } catch {
+        Write-Warning ("Unable to query domain information from {0}: {1}" -f $script:DirectoryServer, $_.Exception.Message)
+    }
+}
+
+if (-not $domainInfo) {
+    throw "Unable to determine domain information required for the validated write tests."
+}
+
+if ($script:DirectoryServer) {
+    Write-Host ("Using domain controller {0} for validated write operations." -f $script:DirectoryServer)
+}
+
 $dnsRoot = $domainInfo.DNSRoot
 $domainObject = $null
 try {
-    $domainObject = Get-ADObject -Identity $domainInfo.DistinguishedName -Properties 'msDS-AllowedDNSSuffixes' -ErrorAction Stop
+    $domainObject = Get-ADObject @script:ADServerParams -Identity $domainInfo.DistinguishedName -Properties 'msDS-AllowedDNSSuffixes' -ErrorAction Stop
 } catch {
     Write-Verbose "Unable to retrieve msDS-AllowedDNSSuffixes for domain: $($_.Exception.Message)"
 }
@@ -366,7 +428,7 @@ $propertiesToLoad = @(
     'objectSid'
 )
 
-$rawObjects = Get-ADObject -SearchBase $OrganizationalUnitDN -SearchScope OneLevel -Filter * -Properties $propertiesToLoad -ErrorAction Stop |
+$rawObjects = Get-ADObject @script:ADServerParams -SearchBase $OrganizationalUnitDN -SearchScope OneLevel -Filter * -Properties $propertiesToLoad -ErrorAction Stop |
     Sort-Object -Property Name
 
 $testCandidates = foreach ($obj in $rawObjects) {

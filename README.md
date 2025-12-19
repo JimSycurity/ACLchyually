@@ -6,3 +6,7 @@ Various Windows Access Control Model resources, heavy on the Access Control List
 [Group Membership](./Membership/Membership.md) - Active Directory accounts for members of groups via the group's `member` property. There are approximately 12 different ACEs that can modify this property.
 
 [Validated Writes](./ValidatedWrites/ValidatedWrites.md) - Active Directory includes a mechanism for restricted writes to specific object properties. Each validated write has rules that must be adhered to above and beyond the default AD schema restrictions for the property values.
+
+[Object Ownership](https://github.com/JimSycurity/OwnerOrPwned) - GitHub repo with link to research paper on object ownership. A full study on the `owner` field of an NT Security Descriptor.
+
+[AdminSDHolder](https://github.com/JimSycurity/AdminSDHolder) - [AdminSDHolder E-Book](https://specterops.io/resources/adminsdholder/)

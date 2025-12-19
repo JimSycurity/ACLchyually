@@ -31,7 +31,9 @@ $groupNames = @(
     "WritePropertyMember",
     "AllValidatedWrites",
     "SelfMembership",
-    "SelfMembershipPropertySet"
+    "SelfMembershipPropertySet",
+    "SelfMembershipSelf",
+    "AllValidatedWritesSelf"
 )
 
 $currentUserResolved = $null

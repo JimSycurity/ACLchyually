@@ -177,6 +177,8 @@ $groupNames = @(
     "AllValidatedWrites",
     "SelfMembership",
     "SelfMembershipPropertySet",    # Testing with property set on VW  
+    "SelfMembershipSelf",  # SELF as Trustee
+    "AllValidatedWritesSelf",  # SELF as trustee
     "TrusteeGroup"
 )
 
@@ -193,30 +195,33 @@ if ($PSBoundParameters.ContainsKey("TrusteeUser")) {
     }
 }
 
+$selfSid = 'S-1-5-10'
 $trusteeSid = $groupCache["TrusteeGroup"].SID
 $membershipPropertySetGuid = Get-ControlAccessGuid -DisplayName "Membership"
 $memberAttributeGuid = Get-SchemaGuid -LdapDisplayName "member"
 $selfMembershipGuid = Get-ControlAccessGuid -DisplayName "Self-Membership"
 
 $aceDefinitions = @(
-    @{ Name = "GenericAllAll"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::GenericAll },
-    @{ Name = "GenericWriteAll"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::GenericWrite },
-    @{ Name = "WritePropertyAll"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::WriteProperty },
-    @{ Name = "GenericAllMembershipPropertySet"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::GenericAll; ObjectGuid = $membershipPropertySetGuid  },    
-    @{ Name = "GenericWriteMembershipPropertySet"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::GenericWrite; ObjectGuid = $membershipPropertySetGuid  },    
-    @{ Name = "WritePropertyMembershipPropertySet"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::WriteProperty; ObjectGuid = $membershipPropertySetGuid },
-    @{ Name = "GenericAllPropertyMember"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::GenericAll; ObjectGuid = $memberAttributeGuid },    
-    @{ Name = "GenericWritePropertyMember"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::GenericWrite; ObjectGuid = $memberAttributeGuid },    
-    @{ Name = "WritePropertyMember"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::WriteProperty; ObjectGuid = $memberAttributeGuid },
-    @{ Name = "AllValidatedWrites"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self },
-    @{ Name = "SelfMembership"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $selfMembershipGuid },
-    @{ Name = "SelfMembershipPropertySet"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $membershipPropertySetGuid } # Testing with property set on VW     
+    @{ Name = "GenericAllAll"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::GenericAll; Trustee = $trusteeSid },
+    @{ Name = "GenericWriteAll"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::GenericWrite; Trustee = $trusteeSid  },
+    @{ Name = "WritePropertyAll"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::WriteProperty; Trustee = $trusteeSid  },
+    @{ Name = "GenericAllMembershipPropertySet"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::GenericAll; ObjectGuid = $membershipPropertySetGuid; Trustee = $trusteeSid   },    
+    @{ Name = "GenericWriteMembershipPropertySet"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::GenericWrite; ObjectGuid = $membershipPropertySetGuid; Trustee = $trusteeSid   },    
+    @{ Name = "WritePropertyMembershipPropertySet"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::WriteProperty; ObjectGuid = $membershipPropertySetGuid; Trustee = $trusteeSid  },
+    @{ Name = "GenericAllPropertyMember"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::GenericAll; ObjectGuid = $memberAttributeGuid; Trustee = $trusteeSid  },    
+    @{ Name = "GenericWritePropertyMember"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::GenericWrite; ObjectGuid = $memberAttributeGuid; Trustee = $trusteeSid  },    
+    @{ Name = "WritePropertyMember"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::WriteProperty; ObjectGuid = $memberAttributeGuid; Trustee = $trusteeSid  },
+    @{ Name = "AllValidatedWrites"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; Trustee = $trusteeSid  },
+    @{ Name = "SelfMembership"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $selfMembershipGuid; Trustee = $trusteeSid  },
+    @{ Name = "SelfMembershipPropertySet"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $membershipPropertySetGuid; Trustee = $trusteeSid  }, # Testing with property set on VW     
+    @{ Name = "SelfMembershipSelf"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; ObjectGuid = $selfMembershipGuid; Trustee = $selfSid },
+    @{ Name = "AllValidatedWritesSelf"; Rights = [System.DirectoryServices.ActiveDirectoryRights]::Self; Trustee = $selfSid }     
 )
 
 foreach ($definition in $aceDefinitions) {
     $targetDn = $groupCache[$definition.Name].DistinguishedName
     $objectGuid = if ($definition.ContainsKey("ObjectGuid")) { $definition.ObjectGuid } else { [Guid]::Empty }
-    Set-TrusteeAccessRule -TargetDistinguishedName $targetDn -TrusteeSid $trusteeSid -Rights $definition.Rights -ObjectType $objectGuid
+    Set-TrusteeAccessRule -TargetDistinguishedName $targetDn -TrusteeSid $($definition.Trustee) -Rights $definition.Rights -ObjectType $objectGuid
 }
 
 $controlUserDn = "CN=ControlUser,$($membership.DistinguishedName)"
